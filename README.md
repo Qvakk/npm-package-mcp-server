@@ -1,9 +1,7 @@
 # 📦 NPM Package MCP Server
-
-[![npm version](https://badge.fury.io/js/npm-package-mcp-server.svg)](https://badge.fury.io/js/npm-package-mcp-server)
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen)](https://nodejs.org/)
 
 > A powerful Model Context Protocol (MCP) server that enables AI assistants to fetch, explore, and analyze source code from any NPM package in real-time.
 
@@ -37,14 +35,7 @@ npm-package-mcp-server
 - **Security Auditing**: Review dependencies for security issues
 - **Migration Planning**: Understand APIs when upgrading packages
 
-## 📖 API Reference
-
-### Tools Available
-
-#### `get_npm_package_code`
-```typescript
-
-## 🔧 Installation & Setup
+##  Installation & Setup
 
 ### Option 1: Global Installation
 ```bash
@@ -54,7 +45,7 @@ npm-package-mcp-server
 
 ### Option 2: Local Development
 ```bash
-git clone https://github.com/Ligament/npm-package-mcp-server.git
+git clone https://github.com/Qvakk/npm-package-mcp-server.git
 cd npm-package-mcp-server
 npm install
 npm run build
