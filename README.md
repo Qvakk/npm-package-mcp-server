@@ -5,15 +5,6 @@
 
 > A powerful Model Context Protocol (MCP) server that enables AI assistants to fetch, explore, and analyze source code from any NPM package in real-time.
 
-## 🚀 Quick Start
-
-```bash
-# Install
-npm install -g npm-package-mcp-server
-
-# Run
-npm-package-mcp-server
-```
 
 ## ✨ Features
 
