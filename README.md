@@ -61,39 +61,23 @@ npm run build
 npm start
 ```
 
-### Option 3: Docker
+### Option 3: Docker (Production)
+
 ```bash
+# Build Docker image
+docker build -t npm-package-mcp-server .
+
+# Run in stdio mode (Claude Desktop)
 docker run -it npm-package-mcp-server
-```
 
-## 🤖 AI Assistant Integration
+# Run in HTTP mode with authentication
+docker run -p 3000:3000 \
+  -e TRANSPORT_MODE=http \
+  -e AUTH_TOKEN=your-secret-key \
+  npm-package-mcp-server
 
-### Claude Desktop
-Add to your `claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "npm-packages": {
-      "command": "npm-package-mcp-server"
-    }
-  }
-}
-```
-
-### Other MCP Clients
-Works with any MCP-compatible client. Configure stdio transport with the server command.
-
-## 🏗️ Architecture
-
-```mermaid
-graph TD
-    A[AI Assistant] --> B[MCP Client]
-    B --> C[NPM Package MCP Server]
-    C --> D[NPM Registry]
-    C --> E[Package Extraction]
-    C --> F[File System]
-    E --> G[Code Analysis]
-    G --> A
+# Or use Docker Compose
+docker-compose up -d
 ```
 
 ## 📊 Supported Packages
@@ -116,72 +100,19 @@ Try these commands with your AI assistant:
 "Review the TypeScript compiler source"
 ```
 
-## 🛠️ Development
-
-### Scripts
-```bash
-npm run build      # Compile TypeScript
-npm run dev        # Development with hot reload
-npm run test       # Run tests
-npm run clean      # Clean build artifacts
-```
-
-### Contributing
-1. Fork the repository
-2. Create feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'Add amazing feature'`
-4. Push to branch: `git push origin feature/amazing-feature`
-5. Open a Pull Request
-
-## 📈 Performance
-
-- **Fast Downloads**: Optimized npm registry API usage
-- **Memory Efficient**: Streams large packages
-- **Smart Caching**: Temporary file management
-- **Error Recovery**: Robust error handling
-
-## 🔒 Security
-
-- **Read-Only**: Never modifies packages
-- **Sandboxed**: Temporary extraction directories
-- **No Execution**: Only reads source code
-- **Public Packages Only**: No private registry access
-
-## 🐛 Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| Package not found | Verify package name on [npmjs.com](https://npmjs.com) |
-| Network errors | Check internet connectivity |
-| Permission errors | Ensure Node.js 18+ and proper permissions |
-| Large packages timeout | Try specific file paths instead of full package |
-
-## 📄 License
-
-MIT © [Ligament](https://github.com/Ligament)
-
-## 🌟 Star History
-
-<a href="https://www.star-history.com/#Ligament/npm-package-mcp-server&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Ligament/npm-package-mcp-server&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Ligament/npm-package-mcp-server&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Ligament/npm-package-mcp-server&type=Date" />
- </picture>
-</a>
-
 ## 🤝 Related Projects
 
 - [Model Context Protocol](https://github.com/modelcontextprotocol/servers)
 - [Claude Desktop](https://claude.ai/desktop)
 - [NPM Registry API](https://github.com/npm/registry)
 
----
+## 🙏 Credits
 
-<div align="center">
+This project is a fork of [Ligament/npm-package-mcp-server](https://github.com/Ligament/npm-package-mcp-server) - thanks for the original implementation!
 
-**[⭐ Star this repo](https://github.com/Ligament/npm-package-mcp-server)** • **[🐛 Report Bug](https://github.com/Ligament/npm-package-mcp-server/issues)** • **[💡 Request Feature](https://github.com/Ligament/npm-package-mcp-server/issues)**
-
-Made with ❤️ for the AI development community
-
-</div>
+Enhanced with:
+- ✅ Production-ready container setup
+- ✅ Bearer token authentication
+- ✅ OWASP MCP Top 10 compliance
+- ✅ Modern TypeScript (v5) with strict mode
+- ✅ Zero vulnerabilities

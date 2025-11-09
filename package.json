@@ -1,6 +1,6 @@
 {
   "name": "npm-package-mcp-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP Server for fetching code from NPM packages",
   "type": "module",
   "main": "dist/server.js",
@@ -10,9 +10,13 @@
   "scripts": {
     "build": "tsc",
     "start": "npm run build && node dist/server.js",
+    "start:http": "npm run build && cross-env TRANSPORT_MODE=http PORT=3000 node dist/server.js",
     "dev": "tsx src/server.ts",
+    "dev:http": "cross-env TRANSPORT_MODE=http PORT=3000 tsx src/server.ts",
     "clean": "rimraf dist",
     "type-check": "tsc --noEmit",
+    "docker:build": "docker build -t npm-package-mcp-server .",
+    "docker:run": "docker run -p 3000:3000 -e TRANSPORT_MODE=http npm-package-mcp-server",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -23,15 +27,25 @@
     "code",
     "typescript"
   ],
-  "author": "Your Name",
+  "author": "Qvakk",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Qvakk/npm-package-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Qvakk/npm-package-mcp-server/issues"
+  },
+  "homepage": "https://github.com/Qvakk/npm-package-mcp-server#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "tar": "^7.0.0"
+    "tar": "^7.0.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/tar": "^6.1.13",
+    "cross-env": "^10.1.0",
     "rimraf": "^5.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
@@ -41,6 +55,6 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

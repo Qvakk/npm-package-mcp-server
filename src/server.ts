@@ -1,37 +1,42 @@
 #!/usr/bin/env node
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
-  CallToolRequestSchema,
   ErrorCode,
-  ListToolsRequestSchema,
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
   McpError,
-  Tool,
-  Resource,
-  CallToolResult,
-  ReadResourceResult,
-  TextContent,
 } from '@modelcontextprotocol/sdk/types.js';
 import https from 'https';
+import { createServer, IncomingMessage, ServerResponse } from 'http';
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import * as tar from 'tar';
 import { fileURLToPath } from 'url';
+import { z } from 'zod';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Types
+type ToolResult = {
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: boolean;
+};
+
+type ResourceResult = {
+  contents: Array<{
+    uri: string;
+    mimeType: string;
+    text: string;
+  }>;
+};
+
 interface PackageInfo {
   name: string;
   version: string;
-  dist: {
-    tarball: string;
-    shasum: string;
-  };
+  dist: { tarball: string; shasum: string };
   description?: string;
   main?: string;
   types?: string;
@@ -39,10 +44,7 @@ interface PackageInfo {
   author?: string | { name: string; email?: string };
   license?: string;
   homepage?: string;
-  repository?: {
-    type: string;
-    url: string;
-  };
+  repository?: { type: string; url: string };
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
 }
@@ -54,26 +56,12 @@ interface SearchResult {
   keywords?: string[];
   author?: string | { name: string; email?: string };
   date: string;
-  links: {
-    npm: string;
-    homepage?: string;
-    repository?: string;
-  };
-  publisher: {
-    username: string;
-    email?: string;
-  };
-  maintainers: Array<{
-    username: string;
-    email?: string;
-  }>;
+  links: { npm: string; homepage?: string; repository?: string };
+  publisher: { username: string; email?: string };
+  maintainers: Array<{ username: string; email?: string }>;
   score: {
     final: number;
-    detail: {
-      quality: number;
-      popularity: number;
-      maintenance: number;
-    };
+    detail: { quality: number; popularity: number; maintenance: number };
   };
 }
 
@@ -82,11 +70,7 @@ interface SearchResponse {
     package: SearchResult;
     score: {
       final: number;
-      detail: {
-        quality: number;
-        popularity: number;
-        maintenance: number;
-      };
+      detail: { quality: number; popularity: number; maintenance: number };
     };
   }>;
   total: number;
@@ -100,46 +84,43 @@ interface CodeFile {
 
 interface GetPackageCodeArgs {
   packageName: string;
-  version?: string;
-  filePath?: string;
+  version?: string | undefined;
+  filePath?: string | undefined;
 }
 
 interface ListPackageFilesArgs {
   packageName: string;
-  version?: string;
+  version?: string | undefined;
 }
 
 interface SearchPackagesArgs {
   query: string;
-  size?: number;
-  from?: number;
+  size?: number | undefined;
+  from?: number | undefined;
 }
 
+// Constants
+const CODE_EXTENSIONS = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.json'];
+const SKIP_DIRECTORIES = ['.git', '.svn', '.hg', 'node_modules', '.DS_Store', '__pycache__'];
+const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_CODE_FILES = 20; // Limit responses to prevent overwhelming
+
 class NpmPackageServer {
-  private server: Server;
-  private readonly codeExtensions = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.json'];
+  private server: McpServer;
   private readonly tempDir: string;
+  private readonly authToken: string | null;
   private popularPackagesCache: string | null = null;
   private popularPackagesCacheTime: number = 0;
-  private readonly CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
 
   constructor() {
     this.tempDir = path.join(__dirname, 'temp');
-    this.server = new Server(
-      {
-        name: 'npm-package-server',
-        version: '1.0.0',
-      },
-      {
-        capabilities: {
-          tools: {},
-          resources: {},
-        },
-      }
+    this.authToken = process.env.AUTH_TOKEN || null;
+    this.server = new McpServer(
+      { name: 'npm-package-server', version: '1.0.0' }
     );
 
-    this.setupToolHandlers();
-    this.setupResourceHandlers();
+    this.registerTools();
+    this.registerResources();
     this.ensureTempDir();
   }
 
@@ -149,160 +130,128 @@ class NpmPackageServer {
     }
   }
 
-  private setupResourceHandlers(): void {
-    this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      const resources: Resource[] = [
-        {
-          uri: 'npm://popular-packages',
-          name: 'Popular NPM Packages',
-          description: 'List of the 50 most popular npm packages with details',
-          mimeType: 'application/json',
-        },
-      ];
-
-      return { resources };
-    });
-
-    this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-      const { uri } = request.params;
-      
-      if (uri === 'npm://popular-packages') {
-        return await this.getPopularPackages();
-      }
-      
-      throw new McpError(ErrorCode.InvalidParams, `Unknown resource: ${uri}`);
-    });
-  }
-
-  private setupToolHandlers(): void {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const tools: Tool[] = [
-        {
-          name: 'get_npm_package_code',
-          description: 'Fetch source code from an npm package',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              packageName: {
-                type: 'string',
-                description: 'The name of the npm package (e.g., "lodash" or "@babel/core")',
-              },
-              version: {
-                type: 'string',
-                description: 'Specific version to fetch (optional, defaults to latest)',
-              },
-              filePath: {
-                type: 'string',
-                description: 'Specific file path within the package (optional, returns all files if not specified)',
-              },
-            },
-            required: ['packageName'],
-          },
-        },
-        {
-          name: 'list_package_files',
-          description: 'List all files in an npm package',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              packageName: {
-                type: 'string',
-                description: 'The name of the npm package',
-              },
-              version: {
-                type: 'string',
-                description: 'Specific version to fetch (optional, defaults to latest)',
-              },
-            },
-            required: ['packageName'],
-          },
-        },
-        {
-          name: 'get_package_info',
-          description: 'Get package metadata and information',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              packageName: {
-                type: 'string',
-                description: 'The name of the npm package',
-              },
-              version: {
-                type: 'string',
-                description: 'Specific version to fetch (optional, defaults to latest)',
-              },
-            },
-            required: ['packageName'],
-          },
-        },
-        {
-          name: 'search_npm_packages',
-          description: 'Search for npm packages by keyword, name, or description',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              query: {
-                type: 'string',
-                description: 'Search query (keywords, package name, description, etc.)',
-              },
-              size: {
-                type: 'number',
-                description: 'Number of results to return (default: 20, max: 250)',
-                minimum: 1,
-                maximum: 250,
-              },
-              from: {
-                type: 'number',
-                description: 'Starting offset for pagination (default: 0)',
-                minimum: 0,
-              },
-            },
-            required: ['query'],
-          },
-        },
-      ];
-
-      return { tools };
-    });
-
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-
-      try {
-        switch (name) {
-          case 'get_npm_package_code':
-            return await this.getNpmPackageCode(args as unknown as GetPackageCodeArgs);
-          case 'list_package_files':
-            return await this.listPackageFiles(args as unknown as ListPackageFilesArgs);
-          case 'get_package_info':
-            return await this.getPackageInfo(args as unknown as ListPackageFilesArgs);
-          case 'search_npm_packages':
-            return await this.searchNpmPackages(args as unknown as SearchPackagesArgs);
-          default:
-            throw new McpError(
-              ErrorCode.MethodNotFound,
-              `Unknown tool: ${name}`
-            );
-        }
-      } catch (error) {
-        if (error instanceof McpError) {
-          throw error;
-        }
-        throw new McpError(
-          ErrorCode.InternalError,
-          `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    });
-  }
-
-  private async searchNpmPackages(args: SearchPackagesArgs): Promise<CallToolResult> {
-    const { query, size = 20, from = 0 } = args;
-    
-    if (!query || typeof query !== 'string' || query.trim().length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, 'query is required and must be a non-empty string');
+  private isAuthValid(authHeader: string | undefined): boolean {
+    if (!this.authToken) {
+      return true; // No token required if AUTH_TOKEN not set
     }
 
+    if (!authHeader) {
+      return false;
+    }
+
+    // Support both "Bearer TOKEN" and "TOKEN" formats
+    const token = authHeader.startsWith('Bearer ') 
+      ? authHeader.slice(7) 
+      : authHeader;
+
+    return token === this.authToken;
+  }
+
+  private registerResources(): void {
+    this.server.registerResource(
+      'popular-packages',
+      'npm://popular-packages',
+      {
+        title: 'Popular NPM Packages',
+        description: 'List of the 50 most popular npm packages with details',
+        mimeType: 'application/json',
+      },
+      async () => await this.getPopularPackages()
+    );
+  }
+
+  private registerTools(): void {
+    // Tool 1: Get NPM Package Code
+    this.server.registerTool(
+      'get_npm_package_code',
+      {
+        title: 'Get NPM Package Code',
+        description: 'Fetch source code from an npm package',
+        inputSchema: {
+          packageName: z.string().describe('The name of the npm package (e.g., "lodash" or "@babel/core")'),
+          version: z.string().optional().describe('Specific version to fetch (optional, defaults to latest)'),
+          filePath: z.string().optional().describe('Specific file path within the package (optional, returns all files if not specified)'),
+        },
+      },
+      async ({ packageName, version, filePath }) => {
+        const args: GetPackageCodeArgs = {
+          packageName,
+          ...(version !== undefined && { version }),
+          ...(filePath !== undefined && { filePath }),
+        };
+        return await this.getNpmPackageCode(args);
+      }
+    );
+
+    // Tool 2: List Package Files
+    this.server.registerTool(
+      'list_package_files',
+      {
+        title: 'List Package Files',
+        description: 'List all files in an npm package',
+        inputSchema: {
+          packageName: z.string().describe('The name of the npm package'),
+          version: z.string().optional().describe('Specific version to fetch (optional, defaults to latest)'),
+        },
+      },
+      async ({ packageName, version }) => {
+        const args: ListPackageFilesArgs = {
+          packageName,
+          ...(version !== undefined && { version }),
+        };
+        return await this.listPackageFiles(args);
+      }
+    );
+
+    // Tool 3: Get Package Info
+    this.server.registerTool(
+      'get_package_info',
+      {
+        title: 'Get Package Info',
+        description: 'Get package metadata and information',
+        inputSchema: {
+          packageName: z.string().describe('The name of the npm package'),
+          version: z.string().optional().describe('Specific version to fetch (optional, defaults to latest)'),
+        },
+      },
+      async ({ packageName, version }) => {
+        const args: ListPackageFilesArgs = {
+          packageName,
+          ...(version !== undefined && { version }),
+        };
+        return await this.getPackageInfo(args);
+      }
+    );
+
+    // Tool 4: Search NPM Packages
+    this.server.registerTool(
+      'search_npm_packages',
+      {
+        title: 'Search NPM Packages',
+        description: 'Search for npm packages by keyword, name, or description',
+        inputSchema: {
+          query: z.string().describe('Search query (keywords, package name, description, etc.)'),
+          size: z.number().min(1).max(250).optional().describe('Number of results to return (default: 20, max: 250)'),
+          from: z.number().min(0).optional().describe('Starting offset for pagination (default: 0)'),
+        },
+      },
+      async ({ query, size, from }) => {
+        const args: SearchPackagesArgs = {
+          query,
+          ...(size !== undefined && { size }),
+          ...(from !== undefined && { from }),
+        };
+        return await this.searchNpmPackages(args);
+      }
+    );
+  }
+
+  private async searchNpmPackages(args: SearchPackagesArgs) {
+    const { query, size = 20, from = 0 } = args;
+    
+    if (!query?.trim()) {
+      throw new McpError(ErrorCode.InvalidParams, 'query is required and must be a non-empty string');
+    }
     if (size > 250) {
       throw new McpError(ErrorCode.InvalidParams, 'size cannot exceed 250');
     }
@@ -321,43 +270,28 @@ class NpmPackageServer {
         resultText += `📦 **${pkg.name}** v${pkg.version}\n`;
         resultText += `   ${pkg.description || 'No description available'}\n`;
         
-        if (pkg.keywords && pkg.keywords.length > 0) {
+        if (pkg.keywords?.length) {
           resultText += `   Keywords: ${pkg.keywords.join(', ')}\n`;
         }
         
         const authorName = typeof pkg.author === 'string' ? pkg.author : pkg.author?.name;
-        if (authorName) {
-          resultText += `   Author: ${authorName}\n`;
-        }
+        if (authorName) resultText += `   Author: ${authorName}\n`;
         
         resultText += `   Score: ${(score.final * 100).toFixed(1)}% (Quality: ${(score.detail.quality * 100).toFixed(1)}%, Popularity: ${(score.detail.popularity * 100).toFixed(1)}%, Maintenance: ${(score.detail.maintenance * 100).toFixed(1)}%)\n`;
         resultText += `   NPM: ${pkg.links.npm}\n`;
         
-        if (pkg.links.homepage) {
-          resultText += `   Homepage: ${pkg.links.homepage}\n`;
-        }
-        
-        if (pkg.links.repository) {
-          resultText += `   Repository: ${pkg.links.repository}\n`;
-        }
+        if (pkg.links.homepage) resultText += `   Homepage: ${pkg.links.homepage}\n`;
+        if (pkg.links.repository) resultText += `   Repository: ${pkg.links.repository}\n`;
         
         resultText += `   Last updated: ${new Date(pkg.date).toLocaleDateString()}\n\n`;
       }
 
-      if (searchResults.objects.length === 0) {
+      if (!searchResults.objects.length) {
         resultText += 'No packages found for this search query.\n';
-        resultText += 'Try:\n';
-        resultText += '- Using different keywords\n';
-        resultText += '- Checking spelling\n';
-        resultText += '- Using more general terms\n';
+        resultText += 'Try using different keywords or checking spelling.\n';
       }
 
-      const content: TextContent = {
-        type: 'text',
-        text: resultText,
-      };
-
-      return { content: [content] };
+      return { content: [{ type: 'text' as const, text: resultText }] };
     } catch (error) {
       throw new McpError(
         ErrorCode.InternalError,
@@ -366,29 +300,24 @@ class NpmPackageServer {
     }
   }
 
-  private async getPopularPackages(): Promise<ReadResourceResult> {
-    // Check cache
+  private async getPopularPackages(): Promise<ResourceResult> {
     const now = Date.now();
-    if (this.popularPackagesCache && (now - this.popularPackagesCacheTime) < this.CACHE_DURATION) {
-      const content: TextContent = {
-        type: 'text',
-        text: this.popularPackagesCache,
+    if (this.popularPackagesCache && (now - this.popularPackagesCacheTime) < CACHE_DURATION) {
+      return { 
+        contents: [{ 
+          uri: 'npm://popular-packages',
+          mimeType: 'text/plain',
+          text: this.popularPackagesCache 
+        }] 
       };
-      return { contents: [content] };
     }
 
     try {
-      // Fetch popular packages by searching with common terms and sorting by popularity
-      const popularQueries = [
-        'react', 'lodash', 'express', 'typescript', 'webpack', 
-        'eslint', 'babel', 'prettier', 'jest', 'axios'
-      ];
-      
+      const popularQueries = ['react', 'lodash', 'express', 'typescript', 'webpack'];
       const allPopularPackages = new Set<string>();
-      const packageDetails: Array<SearchResult> = [];
+      const packageDetails: SearchResult[] = [];
 
-      // Search for each popular term to get a diverse set of packages
-      for (const searchTerm of popularQueries.slice(0, 5)) { // Limit to avoid rate limiting
+      for (const searchTerm of popularQueries) {
         try {
           const results = await this.performPackageSearch(searchTerm, 10, 0);
           for (const result of results.objects) {
@@ -402,9 +331,7 @@ class NpmPackageServer {
         }
       }
 
-      // Sort by a combination of popularity and quality scores
       packageDetails.sort((a, b) => {
-        // We don't have direct access to scores here, so sort by a heuristic
         const scoreA = (a.name.length < 15 ? 1 : 0) + (a.description ? 1 : 0) + (a.keywords?.length || 0) / 10;
         const scoreB = (b.name.length < 15 ? 1 : 0) + (b.description ? 1 : 0) + (b.keywords?.length || 0) / 10;
         return scoreB - scoreA;
@@ -413,46 +340,37 @@ class NpmPackageServer {
       let resultText = '# 🔥 Most Popular NPM Packages\n\n';
       resultText += `Updated: ${new Date().toISOString()}\n\n`;
 
-      const topPackages = packageDetails.slice(0, 50);
-      
-      for (let i = 0; i < topPackages.length; i++) {
-        const pkg = topPackages[i];
+      for (let i = 0; i < Math.min(50, packageDetails.length); i++) {
+        const pkg = packageDetails[i];
+        if (!pkg) continue; // Skip if undefined
+        
         resultText += `## ${i + 1}. ${pkg.name}\n`;
         resultText += `**Version:** ${pkg.version}\n`;
         resultText += `**Description:** ${pkg.description || 'No description available'}\n`;
         
-        if (pkg.keywords && pkg.keywords.length > 0) {
+        if (pkg.keywords?.length) {
           resultText += `**Keywords:** ${pkg.keywords.slice(0, 5).join(', ')}\n`;
         }
         
         const authorName = typeof pkg.author === 'string' ? pkg.author : pkg.author?.name;
-        if (authorName) {
-          resultText += `**Author:** ${authorName}\n`;
-        }
+        if (authorName) resultText += `**Author:** ${authorName}\n`;
         
         resultText += `**NPM:** ${pkg.links.npm}\n`;
-        
-        if (pkg.links.homepage) {
-          resultText += `**Homepage:** ${pkg.links.homepage}\n`;
-        }
-        
-        if (pkg.links.repository) {
-          resultText += `**Repository:** ${pkg.links.repository}\n`;
-        }
-        
+        if (pkg.links.homepage) resultText += `**Homepage:** ${pkg.links.homepage}\n`;
+        if (pkg.links.repository) resultText += `**Repository:** ${pkg.links.repository}\n`;
         resultText += `**Last Updated:** ${new Date(pkg.date).toLocaleDateString()}\n\n`;
       }
 
-      // Cache the result
       this.popularPackagesCache = resultText;
       this.popularPackagesCacheTime = now;
 
-      const content: TextContent = {
-        type: 'text',
-        text: resultText,
+      return { 
+        contents: [{ 
+          uri: 'npm://popular-packages',
+          mimeType: 'text/plain',
+          text: resultText 
+        }] 
       };
-
-      return { contents: [content] };
     } catch (error) {
       throw new McpError(
         ErrorCode.InternalError,
@@ -494,7 +412,7 @@ class NpmPackageServer {
     });
   }
 
-  private async getNpmPackageCode(args: GetPackageCodeArgs): Promise<CallToolResult> {
+  private async getNpmPackageCode(args: GetPackageCodeArgs): Promise<ToolResult> {
     const { packageName, version, filePath } = args;
     
     if (!packageName || typeof packageName !== 'string') {
@@ -524,7 +442,7 @@ class NpmPackageServer {
     }
   }
 
-  private async listPackageFiles(args: ListPackageFilesArgs): Promise<CallToolResult> {
+  private async listPackageFiles(args: ListPackageFilesArgs): Promise<ToolResult> {
     const { packageName, version } = args;
     
     if (!packageName || typeof packageName !== 'string') {
@@ -542,12 +460,12 @@ class NpmPackageServer {
         .map(filePath => path.relative(extractedPath, filePath))
         .sort();
       
-      const content: TextContent = {
-        type: 'text',
-        text: `Package: ${packageName}@${packageInfo.version}\nTotal files: ${fileList.length}\n\nFiles:\n${fileList.join('\n')}`,
+      return { 
+        content: [{ 
+          type: 'text' as const, 
+          text: `Package: ${packageName}@${packageInfo.version}\nTotal files: ${fileList.length}\n\nFiles:\n${fileList.join('\n')}`
+        }] 
       };
-
-      return { content: [content] };
     } catch (error) {
       throw new McpError(
         ErrorCode.InternalError,
@@ -556,7 +474,7 @@ class NpmPackageServer {
     }
   }
 
-  private async getPackageInfo(args: ListPackageFilesArgs): Promise<CallToolResult> {
+  private async getPackageInfo(args: ListPackageFilesArgs): Promise<ToolResult> {
     const { packageName, version } = args;
     
     if (!packageName || typeof packageName !== 'string') {
@@ -583,12 +501,12 @@ class NpmPackageServer {
         devDependencies: Object.keys(packageInfo.devDependencies || {}).length,
       };
 
-      const content: TextContent = {
-        type: 'text',
-        text: `Package Information:\n${JSON.stringify(info, null, 2)}`,
+      return { 
+        content: [{ 
+          type: 'text' as const, 
+          text: `Package Information:\n${JSON.stringify(info, null, 2)}`
+        }] 
       };
-
-      return { content: [content] };
     } catch (error) {
       throw new McpError(
         ErrorCode.InternalError,
@@ -597,7 +515,7 @@ class NpmPackageServer {
     }
   }
 
-  private async getSpecificFile(extractedPath: string, filePath: string): Promise<CallToolResult> {
+  private async getSpecificFile(extractedPath: string, filePath: string): Promise<ToolResult> {
     const fullFilePath = path.join(extractedPath, filePath);
     
     if (!fs.existsSync(fullFilePath)) {
@@ -611,26 +529,20 @@ class NpmPackageServer {
 
     try {
       const content = fs.readFileSync(fullFilePath, 'utf8');
-      const textContent: TextContent = {
-        type: 'text',
-        text: `File: ${filePath}\n\n${content}`,
-      };
-
-      return { content: [textContent] };
+      return { content: [{ type: 'text' as const, text: `File: ${filePath}\n\n${content}` }] };
     } catch (error) {
       throw new Error(`Failed to read file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  private async getAllCodeFiles(extractedPath: string, packageInfo: PackageInfo): Promise<CallToolResult> {
+  private async getAllCodeFiles(extractedPath: string, packageInfo: PackageInfo): Promise<ToolResult> {
     const codeFiles = await this.findCodeFiles(extractedPath);
     
     let allContent = `Package: ${packageInfo.name}@${packageInfo.version}\n`;
     allContent += `Description: ${packageInfo.description || 'No description'}\n`;
     allContent += `Code files found: ${codeFiles.length}\n\n`;
     
-    const maxFiles = 20; // Limit to prevent overwhelming responses
-    const filesToShow = codeFiles.slice(0, maxFiles);
+    const filesToShow = codeFiles.slice(0, MAX_CODE_FILES);
     
     for (const file of filesToShow) {
       const relativePath = path.relative(extractedPath, file.path);
@@ -638,20 +550,15 @@ class NpmPackageServer {
       allContent += file.content + '\n\n';
     }
     
-    if (codeFiles.length > maxFiles) {
-      allContent += `... and ${codeFiles.length - maxFiles} more files\n`;
-      allContent += `Use the 'list_package_files' tool to see all files, then fetch specific files as needed.\n`;
+    if (codeFiles.length > MAX_CODE_FILES) {
+      allContent += `... and ${codeFiles.length - MAX_CODE_FILES} more files\n`;
+      allContent += `Use 'list_package_files' tool to see all files, then fetch specific files as needed.\n`;
     }
     
-    const textContent: TextContent = {
-      type: 'text',
-      text: allContent,
-    };
-
-    return { content: [textContent] };
+    return { content: [{ type: 'text' as const, text: allContent }] };
   }
 
-  private async fetchPackageInfo(packageName: string, version?: string): Promise<PackageInfo> {
+  private async fetchPackageInfo(packageName: string, version?: string | undefined): Promise<PackageInfo> {
     return new Promise((resolve, reject) => {
       const url = version 
         ? `https://registry.npmjs.org/${encodeURIComponent(packageName)}/${encodeURIComponent(version)}`
@@ -810,20 +717,86 @@ class NpmPackageServer {
     return files;
   }
 
-  private shouldSkipDirectory(dirName: string): boolean {
-    const skipDirs = ['.git', '.svn', '.hg', 'node_modules', '.DS_Store', '__pycache__'];
-    return dirName.startsWith('.') || skipDirs.includes(dirName);
+  private isCodeFile(fileName: string): boolean {
+    return CODE_EXTENSIONS.includes(path.extname(fileName).toLowerCase());
   }
 
-  private isCodeFile(fileName: string): boolean {
-    const ext = path.extname(fileName).toLowerCase();
-    return this.codeExtensions.includes(ext);
+  private shouldSkipDirectory(dirName: string): boolean {
+    return dirName.startsWith('.') || SKIP_DIRECTORIES.includes(dirName);
   }
 
   public async run(): Promise<void> {
-    const transport = new StdioServerTransport();
+    const transportMode = process.env.TRANSPORT_MODE || 'stdio';
+    const port = parseInt(process.env.PORT || '3000', 10);
+
+    if (transportMode === 'http') {
+      console.error(`Starting NPM Package MCP server in HTTP mode on port ${port}`);
+      await this.runHttpServer(port);
+    } else {
+      console.error('Starting NPM Package MCP server in stdio mode');
+      const transport = new StdioServerTransport();
+      await this.server.connect(transport);
+    }
+  }
+
+  private async runHttpServer(port: number): Promise<void> {
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => crypto.randomUUID(),
+    });
+    
     await this.server.connect(transport);
-    console.error('NPM Package MCP server running on stdio');
+
+    const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      // CORS headers
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      
+      if (req.method === 'OPTIONS') {
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+
+      // Authentication check for all endpoints if AUTH_TOKEN is set
+      if (this.authToken && !this.isAuthValid(req.headers.authorization)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized: Invalid or missing authentication token' }));
+        return;
+      }
+
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          status: 'healthy', 
+          service: 'npm-package-mcp-server',
+          version: '1.0.0'
+        }));
+        return;
+      }
+
+      if (req.url?.startsWith('/mcp')) {
+        try {
+          await transport.handleRequest(req, res);
+        } catch (error) {
+          console.error('Error handling MCP request:', error);
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Internal server error' }));
+          }
+        }
+        return;
+      }
+
+      res.writeHead(404);
+      res.end('Not Found');
+    });
+
+    httpServer.listen(port, () => {
+      console.error(`NPM Package MCP server listening on http://localhost:${port}`);
+      console.error(`MCP endpoint: http://localhost:${port}/mcp`);
+      console.error(`Health check: http://localhost:${port}/health`);
+    });
   }
 
   public cleanup(): void {

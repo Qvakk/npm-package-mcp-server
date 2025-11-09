@@ -1,0 +1,35 @@
+services:
+  npm-package-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: npm-package-mcp-server:latest
+    container_name: npm-package-mcp-server
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - TRANSPORT_MODE=http
+      - PORT=3000
+      # Optional: Set AUTH_TOKEN for API authentication
+      # Uncomment and set a strong token for production
+      # - AUTH_TOKEN=your-secret-token-here
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    volumes:
+      # Optional: Mount temp directory to host for debugging
+      - ./temp:/app/temp
+    networks:
+      - mcp-network
+    labels:
+      - "com.docker.compose.project=npm-package-mcp"
+      - "service=mcp-server"
+
+networks:
+  mcp-network:
+    driver: bridge
