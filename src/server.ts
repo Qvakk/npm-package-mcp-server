@@ -419,6 +419,9 @@ class NpmPackageServer {
       throw new McpError(ErrorCode.InvalidParams, 'packageName is required and must be a string');
     }
 
+    // Validate package name to prevent injection attacks
+    this.validatePackageName(packageName);
+
     try {
       // Get package metadata to find tarball URL
       const packageInfo = await this.fetchPackageInfo(packageName, version);
@@ -448,6 +451,9 @@ class NpmPackageServer {
     if (!packageName || typeof packageName !== 'string') {
       throw new McpError(ErrorCode.InvalidParams, 'packageName is required and must be a string');
     }
+
+    // Validate package name
+    this.validatePackageName(packageName);
 
     try {
       const packageInfo = await this.fetchPackageInfo(packageName, version);
@@ -480,6 +486,9 @@ class NpmPackageServer {
     if (!packageName || typeof packageName !== 'string') {
       throw new McpError(ErrorCode.InvalidParams, 'packageName is required and must be a string');
     }
+
+    // Validate package name
+    this.validatePackageName(packageName);
 
     try {
       const packageInfo = await this.fetchPackageInfo(packageName, version);
@@ -516,7 +525,16 @@ class NpmPackageServer {
   }
 
   private async getSpecificFile(extractedPath: string, filePath: string): Promise<ToolResult> {
-    const fullFilePath = path.join(extractedPath, filePath);
+    // Validate and resolve path to prevent traversal attacks
+    let fullFilePath: string;
+    try {
+      fullFilePath = this.validateAndResolvePath(extractedPath, filePath);
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Invalid file path: ${error instanceof Error ? error.message : 'Path traversal detected'}`
+      );
+    }
     
     if (!fs.existsSync(fullFilePath)) {
       throw new Error(`File not found: ${filePath}`);
@@ -723,6 +741,47 @@ class NpmPackageServer {
 
   private shouldSkipDirectory(dirName: string): boolean {
     return dirName.startsWith('.') || SKIP_DIRECTORIES.includes(dirName);
+  }
+
+  private validateAndResolvePath(basePath: string, userPath: string): string {
+    // Normalize the path to remove .. and ./ sequences
+    const normalizedPath = path.normalize(userPath).replace(/^(\.\.[\/\\])+/, '');
+    
+    // Join with base path
+    const fullPath = path.join(basePath, normalizedPath);
+    
+    // Resolve both paths to absolute form
+    const resolvedPath = path.resolve(fullPath);
+    const resolvedBasePath = path.resolve(basePath);
+    
+    // Ensure the resolved path is still within the base path (prevent traversal)
+    if (!resolvedPath.startsWith(resolvedBasePath)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'Access denied: Path traversal attempt detected'
+      );
+    }
+    
+    return resolvedPath;
+  }
+
+  private validatePackageName(packageName: string): void {
+    // Allow @scope/name format and simple names
+    // Disallow: ../, ..\\, null bytes, and other suspicious patterns
+    if (!/^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/i.test(packageName)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'Invalid package name format. Package names must follow npm naming conventions.'
+      );
+    }
+    
+    // Additional checks
+    if (packageName.includes('..') || packageName.includes('\0') || packageName.includes('\n')) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'Invalid package name: contains prohibited characters'
+      );
+    }
   }
 
   public async run(): Promise<void> {
