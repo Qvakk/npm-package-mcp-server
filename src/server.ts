@@ -799,11 +799,37 @@ class NpmPackageServer {
   }
 
   private async runHttpServer(port: number): Promise<void> {
+    // Session cleanup configuration
+    const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // Run cleanup every 5 minutes
+    const activeSessions = new Map<string, number>(); // sessionId -> lastActivityTimestamp
+
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
     });
     
     await this.server.connect(transport);
+
+    // Periodic session cleanup
+    const cleanupInterval = setInterval(() => {
+      const now = Date.now();
+      let cleanedCount = 0;
+      
+      for (const [sessionId, lastActivity] of activeSessions.entries()) {
+        if (now - lastActivity > SESSION_TIMEOUT_MS) {
+          activeSessions.delete(sessionId);
+          cleanedCount++;
+          console.error(`Cleaned up inactive session: ${sessionId}`);
+        }
+      }
+      
+      if (cleanedCount > 0) {
+        console.error(`Session cleanup: removed ${cleanedCount} inactive sessions, ${activeSessions.size} active`);
+      }
+    }, CLEANUP_INTERVAL_MS);
+
+    // Clean up interval on server shutdown
+    process.on('exit', () => clearInterval(cleanupInterval));
 
     const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       // CORS headers
@@ -829,13 +855,33 @@ class NpmPackageServer {
         res.end(JSON.stringify({ 
           status: 'healthy', 
           service: 'npm-package-mcp-server',
-          version: '1.0.0'
+          version: '1.0.0',
+          activeSessions: activeSessions.size
+        }));
+        return;
+      }
+
+      // Session reset endpoint - useful for clearing stuck sessions without restart
+      if (req.url === '/sessions/reset' && req.method === 'POST') {
+        const count = activeSessions.size;
+        activeSessions.clear();
+        console.error(`Manually cleared ${count} sessions`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          message: 'All sessions cleared',
+          clearedCount: count
         }));
         return;
       }
 
       if (req.url?.startsWith('/mcp')) {
         try {
+          // Track session activity
+          const sessionId = req.headers['mcp-session-id'] as string | undefined;
+          if (sessionId) {
+            activeSessions.set(sessionId, Date.now());
+          }
+
           await transport.handleRequest(req, res);
         } catch (error) {
           console.error('Error handling MCP request:', error);
@@ -855,6 +901,8 @@ class NpmPackageServer {
       console.error(`NPM Package MCP server listening on http://localhost:${port}`);
       console.error(`MCP endpoint: http://localhost:${port}/mcp`);
       console.error(`Health check: http://localhost:${port}/health`);
+      console.error(`Session reset: POST http://localhost:${port}/sessions/reset`);
+      console.error(`Session timeout: ${SESSION_TIMEOUT_MS / 1000 / 60} minutes`);
     });
   }
 
